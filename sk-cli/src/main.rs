@@ -76,8 +76,17 @@ enum SkSubcommand {
     )]
     Transform(transform::Args),
 
-    #[command(subcommand, visible_alias = "val")]
-    Validate(ValidateSubcommand),
+    #[command(visible_alias = "val")]
+    Validate {
+        #[arg(long_help = "location of the input trace file")]
+        trace_path: String,
+
+        #[arg(long, long_help = "print sample SKEL code to fix the trace", default_value = "false")]
+        generate_skel: bool,
+
+        #[command(subcommand)]
+        sub: Option<ValidateSubcommand>,
+    },
 
     #[command(about = "simkube version")]
     Version,
@@ -123,7 +132,9 @@ async fn main() -> EmptyResult {
             transform::cmd(args).await?;
             transform::output_stats(&metrics_recorder)
         },
-        SkSubcommand::Validate(subcommand) => validation::cmd(subcommand).await,
+        SkSubcommand::Validate { trace_path, generate_skel, sub: maybe_subcommand } => {
+            validation::cmd(trace_path, *generate_skel, maybe_subcommand).await
+        },
         SkSubcommand::Version => {
             println!("skctl {}", crate_version!());
             Ok(())
