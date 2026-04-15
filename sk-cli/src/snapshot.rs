@@ -29,6 +29,14 @@ pub struct Args {
         default_value = "trace.out"
     )]
     pub output: String,
+
+    #[arg(
+        long,
+        long_help = "capture verbatim cluster state into the trace's initial_state field, \
+                     instead of recording a deduplicated event stream.  Use this to seed a \
+                     replay cluster from a specific captured state."
+    )]
+    pub seed: bool,
 }
 
 pub async fn cmd(args: &Args) -> EmptyResult {
@@ -43,9 +51,15 @@ pub async fn cmd(args: &Args) -> EmptyResult {
 
     println!("Exporting snapshot data from store...");
     let filters = ExportFilters::new(args.excluded_namespaces.clone(), vec![]);
-    let start_ts = UtcClock.now_ts();
-    let end_ts = start_ts + 1;
-    let data = manager.get_store().lock().await.export(start_ts, end_ts, &filters).await?;
+    let store = manager.get_store();
+    let store = store.lock().await;
+    let data = if args.seed {
+        store.export_seed(&filters)?
+    } else {
+        let start_ts = UtcClock.now_ts();
+        let end_ts = start_ts + 1;
+        store.export(start_ts, end_ts, &filters).await?
+    };
 
     println!("Writing trace file: {}", args.output);
     let mut file = File::create(&args.output)?;

@@ -81,6 +81,43 @@ impl TraceStore {
         Ok(data)
     }
 
+    // export_seed produces a trace whose initial_state is the current verbatim cluster state and
+    // whose events list is empty.  Unlike export(), it does not deduplicate against tracked
+    // owners: every captured object lands in the seed, including Pods whose Deployment is also
+    // captured.  This is what the driver's seed-apply pass needs to reproduce a specific cluster
+    // state - a Pod's spec.nodeName, status, and finalizers are load-bearing for behavioral
+    // equivalence and must not be reconstituted by re-running the owning controller.
+    pub fn export_seed(&self, filter: &ExportFilters) -> anyhow::Result<Vec<u8>> {
+        info!("Exporting verbatim seed snapshot with filters: {filter:?}");
+
+        let mut current_state: HashMap<(GVK, String), DynamicObject> = HashMap::new();
+        for evt in self.events.iter() {
+            for obj in &evt.applied_objs {
+                if object_matches_filter(obj, filter) {
+                    continue;
+                }
+                let gvk = GVK::from_dynamic_obj(obj)?;
+                current_state.insert((gvk, obj.namespaced_name()), obj.clone());
+            }
+            for obj in &evt.deleted_objs {
+                let gvk = GVK::from_dynamic_obj(obj)?;
+                current_state.remove(&(gvk, obj.namespaced_name()));
+            }
+        }
+
+        let initial_state: Vec<DynamicObject> = current_state.into_values().collect();
+        let num_seeded = initial_state.len();
+        let data = ExportedTrace {
+            config: self.config.clone(),
+            initial_state,
+            ..Default::default()
+        }
+        .to_bytes()?;
+
+        info!("Exported {} seed objects", num_seeded);
+        Ok(data)
+    }
+
     pub(super) async fn collect_events(
         &self,
         start_ts: i64,
