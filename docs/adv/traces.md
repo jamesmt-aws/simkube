@@ -69,7 +69,45 @@ When the driver runs a trace with a non-empty `initial_state`, it materializes t
 (rewriting namespaces for namespace-scoped objects, preserving cluster-scoped objects verbatim,
 and applying captured `.status` via a follow-up `patch_status` pass) before stepping into the
 event loop.  Set `sim.spec.duration` to control how long the driver holds the simulated cluster
-open after applying the seed.
+open after applying the seed.  A seed-only trace without a duration is a hard error: there is no
+sensible default for "how long should the driver hold the cluster open."
+
+### Caveats
+
+A few assumptions baked into the current design.  Each is fine for the use case the feature was
+built for; some will surface as failure modes in adjacent use cases.
+
+**Owner reference UIDs are not threaded.**  The Kubernetes apiserver mints fresh UIDs on object
+create, so any ownerRef UIDs in seed objects are stale by the time they reach the replay
+cluster.  We make no attempt to rewrite them.  This is fine for controllers that associate
+objects via labels (e.g. `karpenter.sh/nodepool`) or via providerID matching, and for the
+Kubernetes garbage collector if you do not delete owner objects mid-simulation.  Controllers
+that strictly UID-match dependents will treat seed objects as orphaned and may detach them.
+
+**Captured `.status` is replayed verbatim.**  If the captured cluster had a NodeClaim in
+`Ready=False` state, the replay cluster gets the same condition.  If you want a clean replay,
+capture a clean cluster - the seed-state path does not heuristically curate status fields.
+
+**DaemonSet pods are filtered even in verbatim mode.**  The export filter that drops
+DaemonSet-owned pods applies to seed exports too.  If your DaemonSet is part of the seed,
+re-applying its pods with stale ownerRefs would not work cleanly anyway; the DaemonSet
+controller will recreate them in the replay cluster.
+
+**Status patch races against running controllers.**  `apply_seed_state` applies specs in pass
+one and statuses in pass two.  If a controller is already reconciling between the two passes,
+it can mutate status between our spec apply and our status patch, and we will overwrite its
+work.  In practice this means: scale relevant controllers to zero before starting the driver,
+then scale them up after the seed is fully applied.  The driver does not enforce this.
+
+**`sim.spec.duration` is overloaded.**  For traces with events, it caps the event stream and
+governs replay length.  For seed-only traces, it governs how long the driver holds the cluster
+open after the seed is applied.  This is two semantics on one knob; we did not add a separate
+`holdAfterReplay` field for now.
+
+**Replay path still assumes namespace-scoped events.**  Cluster-scoped objects work in
+`initial_state` (seed); they do not work in `events` (replay).  If you record a trace that
+tracks cluster-scoped GVKs, the replay loop will panic on the namespace unwrap.  Pre-existing
+limitation, unrelated to seed state, called out here for completeness.
 
 ### Trace format version
 
