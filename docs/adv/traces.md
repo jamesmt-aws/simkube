@@ -109,6 +109,14 @@ open after the seed is applied.  This is two semantics on one knob; we did not a
 tracks cluster-scoped GVKs, the replay loop will panic on the namespace unwrap.  Pre-existing
 limitation, unrelated to seed state, called out here for completeness.
 
+**Snapshot captures race against watcher readiness.**  `skctl snapshot --seed` calls
+`TraceManager::wait_ready` before exporting, but watchers that are still syncing their initial
+list against the apiserver can miss their first observation of an object.  In one end-to-end
+run, a `karpenter.sh/v1.NodePool` that was present in the cluster did not appear in the
+resulting trace.  Workaround today: re-snapshot, or add your own settling time.  A
+`--wait-ms` or `--require-gvks` flag on `skctl snapshot` would surface this cleanly; both are
+follow-up work.
+
 ### Trace format version
 
 `initial_state` was added in trace format version 3.  v3 traces are not loadable by SimKube
