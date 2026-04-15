@@ -307,10 +307,6 @@ impl TraceStore {
             .await;
 
         for owner in owners {
-            // TODO right now we only look up _namespaced_ owners, not cluster-scoped; in
-            // principle, it's possible to get the cluster-scoped owners, since the owner
-            // cache knows what they are, but passing that information back up to us is
-            // sortof annoying and I don't want to bother right now.
             let owner_ns_name = match obj.namespace() {
                 Some(ns) => format!("{}/{}", ns, owner.name),
                 None => owner.name.clone(),
