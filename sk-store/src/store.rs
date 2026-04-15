@@ -87,14 +87,33 @@ impl TraceStore {
     // captured.  This is what the driver's seed-apply pass needs to reproduce a specific cluster
     // state - a Pod's spec.nodeName, status, and finalizers are load-bearing for behavioral
     // equivalence and must not be reconstituted by re-running the owning controller.
-    pub fn export_seed(&self, filter: &ExportFilters) -> anyhow::Result<Vec<u8>> {
-        info!("Exporting verbatim seed snapshot with filters: {filter:?}");
+    //
+    // `cluster_required_labels`, if non-empty, restricts cluster-scoped objects (those with no
+    // namespace) to only those carrying at least one of the given label keys.  This is how
+    // callers avoid capturing pre-existing infrastructure objects: the Karpenter use case
+    // passes "karpenter.sh/nodepool" to include only Nodes that Karpenter provisioned.
+    pub fn export_seed(
+        &self,
+        filter: &ExportFilters,
+        cluster_required_labels: &[String],
+    ) -> anyhow::Result<Vec<u8>> {
+        info!("Exporting verbatim seed snapshot with filters: {filter:?}, cluster-required labels: {cluster_required_labels:?}");
 
         let mut current_state: HashMap<(GVK, String), DynamicObject> = HashMap::new();
         for evt in self.events.iter() {
             for obj in &evt.applied_objs {
                 if object_matches_filter(obj, filter) {
                     continue;
+                }
+                if obj.metadata.namespace.is_none() && !cluster_required_labels.is_empty() {
+                    let has_required = obj
+                        .metadata
+                        .labels
+                        .as_ref()
+                        .is_some_and(|labels| cluster_required_labels.iter().any(|k| labels.contains_key(k)));
+                    if !has_required {
+                        continue;
+                    }
                 }
                 let gvk = GVK::from_dynamic_obj(obj)?;
                 current_state.insert((gvk, obj.namespaced_name()), obj.clone());

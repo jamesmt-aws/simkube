@@ -133,7 +133,7 @@ async fn test_export_seed_keeps_owned_objects(mut tracer: TraceStore, test_deplo
     tracer.create_or_update_obj(&test_deployment, 4).unwrap();
     tracer.create_or_update_obj(&replicaset, 5).unwrap();
 
-    let data = tracer.export_seed(&Default::default()).unwrap();
+    let data = tracer.export_seed(&Default::default(), &[]).unwrap();
     let trace = ExportedTrace::import(data, None).unwrap();
 
     // Verbatim mode keeps both the Deployment and the ReplicaSet, unlike the dedup
@@ -161,11 +161,39 @@ async fn test_export_seed_respects_excluded_namespaces(mut tracer: TraceStore) {
         excluded_namespaces: vec!["kube-system".into()],
         ..Default::default()
     };
-    let data = tracer.export_seed(&filter).unwrap();
+    let data = tracer.export_seed(&filter, &[]).unwrap();
     let trace = ExportedTrace::import(data, None).unwrap();
 
     assert_len_eq_x!(&trace.initial_state, 1);
     assert_eq!(trace.initial_state[0].name_any(), "keep");
+}
+
+#[rstest(tokio::test)]
+async fn test_export_seed_cluster_required_labels(mut tracer: TraceStore) {
+    // Two cluster-scoped objects: one with the required label, one without.  Only the labeled
+    // one survives.  Namespace-scoped objects are untouched by this filter.
+    let node_api_version = ApiResource::from_gvk(&NODE_GVK);
+
+    let mut karpenter_node = DynamicObject::new("karpenter-1", &node_api_version);
+    karpenter_node
+        .labels_mut()
+        .insert("karpenter.sh/nodepool".into(), "default".into());
+
+    let infra_node = DynamicObject::new("control-plane-1", &node_api_version);
+
+    let ns_scoped_depl = test_deployment("stays");
+
+    tracer.create_or_update_obj(&karpenter_node, 1).unwrap();
+    tracer.create_or_update_obj(&infra_node, 2).unwrap();
+    tracer.create_or_update_obj(&ns_scoped_depl, 3).unwrap();
+
+    let data = tracer
+        .export_seed(&Default::default(), &["karpenter.sh/nodepool".to_string()])
+        .unwrap();
+    let trace = ExportedTrace::import(data, None).unwrap();
+
+    let names: Vec<_> = trace.initial_state.iter().map(|o| o.name_any()).collect();
+    assert_bag_eq!(names, vec!["karpenter-1".to_string(), "stays".to_string()]);
 }
 
 #[rstest(tokio::test)]
@@ -175,7 +203,7 @@ async fn test_export_seed_respects_deletes(mut tracer: TraceStore) {
     tracer.index.insert(DEPL_GVK.clone(), obj.namespaced_name(), TEST_DEPL_HASH);
     tracer.delete_obj(&obj, 5).unwrap();
 
-    let data = tracer.export_seed(&Default::default()).unwrap();
+    let data = tracer.export_seed(&Default::default(), &[]).unwrap();
     let trace = ExportedTrace::import(data, None).unwrap();
 
     // Object was created then deleted before snapshot; it should not appear in seed state.

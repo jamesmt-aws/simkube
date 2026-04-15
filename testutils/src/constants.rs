@@ -1,4 +1,5 @@
 use k8s_openapi::api::apps::v1 as appsv1;
+use k8s_openapi::api::core::v1 as corev1;
 use lazy_static::lazy_static;
 use sk_core::k8s::{
     GVK,
@@ -24,4 +25,5 @@ lazy_static! {
     pub static ref DEPL_GVK: GVK = appsv1::Deployment::gvk();
     pub static ref DS_GVK: GVK = appsv1::DaemonSet::gvk();
     pub static ref REPLICASET_GVK: GVK = appsv1::ReplicaSet::gvk();
+    pub static ref NODE_GVK: GVK = corev1::Node::gvk();
 }

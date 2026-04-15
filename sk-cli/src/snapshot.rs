@@ -37,6 +37,17 @@ pub struct Args {
                      replay cluster from a specific captured state."
     )]
     pub seed: bool,
+
+    #[arg(
+        long = "cluster-required-label",
+        long_help = "restrict captured cluster-scoped objects (Nodes, NodePools, CRs with no \
+                     namespace) to those carrying at least one of the given label keys. \
+                     Prevents capturing pre-existing infrastructure objects that would be \
+                     cascade-deleted on simulation cleanup.  E.g. pass karpenter.sh/nodepool \
+                     to include only Karpenter-provisioned Nodes.  Only meaningful with --seed.",
+        value_delimiter = ',',
+    )]
+    pub cluster_required_labels: Vec<String>,
 }
 
 pub async fn cmd(args: &Args) -> EmptyResult {
@@ -54,8 +65,11 @@ pub async fn cmd(args: &Args) -> EmptyResult {
     let store = manager.get_store();
     let store = store.lock().await;
     let data = if args.seed {
-        store.export_seed(&filters)?
+        store.export_seed(&filters, &args.cluster_required_labels)?
     } else {
+        if !args.cluster_required_labels.is_empty() {
+            println!("warning: --cluster-required-label is ignored without --seed");
+        }
         let start_ts = UtcClock.now_ts();
         let end_ts = start_ts + 1;
         store.export(start_ts, end_ts, &filters).await?
