@@ -84,6 +84,25 @@ fn test_v2_trace_imports_with_empty_initial_state() {
 }
 
 #[rstest]
+fn test_v3_initial_state_round_trips() {
+    // Confirm that a v3 trace with non-empty initial_state survives a serialize/import cycle
+    // with the seed objects intact.  Catches regressions in serde renaming or field ordering.
+    let mut trace = ExportedTrace::default();
+    let mut seeded = test_deployment("seed-me");
+    seeded.data["status"] = serde_json::json!({"replicas": 7});
+    trace.initial_state = vec![seeded];
+    trace.events = vec![TraceEvent { ts: 1000, ..Default::default() }];
+
+    let bytes = rmp_serde::to_vec_named(&trace).unwrap();
+    let imported = ExportedTrace::import(bytes, None).unwrap();
+
+    assert_len_eq_x!(&imported.initial_state, 1);
+    assert_eq!(imported.initial_state[0].name_any(), "seed-me");
+    assert_eq!(imported.initial_state[0].data["status"]["replicas"], 7);
+    assert_eq!(imported.events.len(), 1);
+}
+
+#[rstest]
 fn test_unsupported_old_trace_version_rejected() {
     let v1 = ExportedTraceV2 {
         version: 1,

@@ -221,7 +221,7 @@ pub fn build_seed_obj(
     sobj
 }
 
-async fn apply_seed_state(
+pub(crate) async fn apply_seed_state(
     ctx: &DriverContext,
     root: &SimulationRoot,
     apiset: &mut DynamicApiSet,

@@ -13,6 +13,7 @@ use super::helpers::{
 };
 use super::*;
 use crate::runner::{
+    apply_seed_state,
     build_seed_obj,
     build_virtual_ns,
     build_virtual_obj,
@@ -226,7 +227,79 @@ async fn test_cleanup_trace() {
 }
 
 mod itest {
+    use std::sync::atomic::{
+        AtomicUsize,
+        Ordering,
+    };
+    use std::sync::Arc;
+
     use super::*;
+
+    #[rstest(tokio::test)]
+    async fn test_apply_seed_state_two_pass(test_sim_root: SimulationRoot) {
+        // A seed object with non-empty .status: apply_seed_state must (1) PATCH the spec without
+        // status, then (2) PATCH /status separately, in that order.  This is the contract that
+        // keeps controllers from observing half-populated objects mid-seed.
+        let (mut fake_apiserver, client) = make_fake_apiserver();
+        let cache = OwnersCache::new(DynamicApiSet::new(client.clone()));
+
+        let mut seed_obj = test_deployment("seeded");
+        seed_obj.data["status"] = json!({"replicas": 3, "readyReplicas": 3});
+
+        let mut trace = ExportedTrace::default();
+        trace.initial_state = vec![seed_obj];
+        let ctx = build_driver_context(cache, trace);
+
+        // Discovery for apps/v1
+        fake_apiserver.handle(|when, then| {
+            when.path("/apis/apps/v1");
+            then.json_body(apps_v1_discovery());
+        });
+
+        // Virtual namespace does not yet exist; driver creates it.
+        fake_apiserver.handle_not_found(format!("/api/v1/namespaces/{TEST_VIRT_NS_PREFIX}-{TEST_NAMESPACE}"));
+        fake_apiserver.handle(|when, then| {
+            when.path("/api/v1/namespaces").method(POST);
+            then.json_body(json!({"kind": "Namespace", "metadata": {"name": "ok"}}));
+        });
+
+        // Track which patch path was hit and in what order.  Pass 1 PATCH must precede pass 2
+        // PATCH /status; if they swap, the bug is the controller observing half-populated state.
+        let order = Arc::new(AtomicUsize::new(0));
+        let spec_seen_at = Arc::new(AtomicUsize::new(usize::MAX));
+        let status_seen_at = Arc::new(AtomicUsize::new(usize::MAX));
+
+        let order_spec = order.clone();
+        let spec_seen_clone = spec_seen_at.clone();
+        fake_apiserver.handle(move |when, then| {
+            when.method(PATCH).path(format!(
+                "/apis/apps/v1/namespaces/{TEST_VIRT_NS_PREFIX}-{TEST_NAMESPACE}/deployments/seeded"
+            ));
+            spec_seen_clone.store(order_spec.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+            then.json_body(status_ok());
+        });
+
+        let order_status = order.clone();
+        let status_seen_clone = status_seen_at.clone();
+        fake_apiserver.handle(move |when, then| {
+            when.method(PATCH).path(format!(
+                "/apis/apps/v1/namespaces/{TEST_VIRT_NS_PREFIX}-{TEST_NAMESPACE}/deployments/seeded/status"
+            ));
+            status_seen_clone.store(order_status.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
+            then.json_body(status_ok());
+        });
+
+        let mut apiset = DynamicApiSet::new(client.clone());
+        let ns_api: kube::Api<corev1::Namespace> = kube::Api::all(client.clone());
+        apply_seed_state(&ctx, &test_sim_root, &mut apiset, &ns_api).await.unwrap();
+
+        let spec_idx = spec_seen_at.load(Ordering::SeqCst);
+        let status_idx = status_seen_at.load(Ordering::SeqCst);
+        assert!(spec_idx < usize::MAX, "spec patch never received");
+        assert!(status_idx < usize::MAX, "status patch never received");
+        assert!(spec_idx < status_idx, "status patch must come after spec patch (got spec={spec_idx}, status={status_idx})");
+        fake_apiserver.assert();
+    }
 
     #[rstest(tokio::test)]
     #[case::has_start_marker(true)]

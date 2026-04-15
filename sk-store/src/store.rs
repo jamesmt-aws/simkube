@@ -105,7 +105,14 @@ impl TraceStore {
             }
         }
 
-        let initial_state: Vec<DynamicObject> = current_state.into_values().collect();
+        // Sort by (gvk, namespaced_name) so the seed object order in the trace is
+        // reproducible across exports.  HashMap iteration order is otherwise
+        // non-deterministic, which makes A/B comparison runs unnecessarily noisy.
+        let mut sorted: Vec<((GVK, String), DynamicObject)> = current_state.into_iter().collect();
+        sorted.sort_by(|((gvk_a, name_a), _), ((gvk_b, name_b), _)| {
+            format_gvk_name(gvk_a, name_a).cmp(&format_gvk_name(gvk_b, name_b))
+        });
+        let initial_state: Vec<DynamicObject> = sorted.into_iter().map(|(_, obj)| obj).collect();
         let num_seeded = initial_state.len();
         let data = ExportedTrace {
             config: self.config.clone(),
