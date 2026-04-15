@@ -43,3 +43,36 @@ volume-mounted into the driver pod.  If you are running locally via `kind`, you 
 From there, when you run a simulation, you need to specify the trace data using `skctl run --trace-path
 file:///data/trace`.  This location is the location _inside the Kind node docker container_, not inside the driver pod.
 SimKube will automatically construct the appropriate volume mounts so that the driver pod can reference the trace.
+
+## Seed state
+
+The standard recording path captures a stream of events: which objects were created, modified, and
+deleted between two timestamps.  Replaying that stream into a fresh cluster reconstructs whatever
+state the original cluster had at the trace's end time, but the path it takes is to re-run the
+events.
+
+Sometimes you want to start a simulation from a specific cluster state without replaying any
+history first - for example, to A/B test how two builds of a controller respond to an
+identical starting configuration.  For this, use `skctl snapshot --seed`:
+
+```bash
+skctl snapshot --config tracker-config.yaml --seed -o seed.trace
+```
+
+A `--seed` snapshot writes the captured objects verbatim into the trace's `initial_state` field.
+Unlike a normal export, it does not deduplicate against tracked owners: a Pod whose Deployment is
+also captured is preserved with its `spec.nodeName`, status, and finalizers intact.  This matters
+when pod placement, controller-managed status conditions, or finalizers are load-bearing for the
+behavior you are testing.
+
+When the driver runs a trace with a non-empty `initial_state`, it materializes those objects
+(rewriting namespaces for namespace-scoped objects, preserving cluster-scoped objects verbatim,
+and applying captured `.status` via a follow-up `patch_status` pass) before stepping into the
+event loop.  Set `sim.spec.duration` to control how long the driver holds the simulated cluster
+open after applying the seed.
+
+### Trace format version
+
+`initial_state` was added in trace format version 3.  v3 traces are not loadable by SimKube
+binaries built before version 2.5.0.  v2 traces remain loadable by current binaries (the seed
+state is treated as empty).

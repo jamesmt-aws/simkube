@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 Breaking changes are annotated with the ⚠️ symbol.
 
+## Unreleased
+
+### Features
+
+- Trace format v3: traces now carry an optional `initial_state` field of objects to materialize
+  before the event loop runs.  See `docs/adv/traces.md` for details.
+- `skctl snapshot --seed` captures a verbatim cluster-state snapshot into a trace's
+  `initial_state` field, suitable for seeding a replay cluster from a specific captured state.
+- The driver applies `initial_state` objects (preserving cluster-scoped identity and status) as a
+  pre-pass before the event loop.  Status subresources are written in a follow-up pass after all
+  specs are present.
+
+### Bug Fixes
+
+- Fix unwrap panic in the export path's owner-chain lookup when a tracked object is
+  cluster-scoped.
+
+### Breaking Changes (read carefully)
+
+- ⚠️ Trace format bumped from v2 to v3.  v3 traces are not loadable by older SimKube binaries.
+  v2 traces remain loadable by current binaries (`initial_state` defaults to empty).  v1 traces
+  hard-fail with a clear error message.
+
 ## 2.4.4 - 2026-01-29
 
 ### 🐛 Bug Fixes
