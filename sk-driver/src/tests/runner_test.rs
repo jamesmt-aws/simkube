@@ -13,6 +13,7 @@ use super::helpers::{
 };
 use super::*;
 use crate::runner::{
+    build_seed_obj,
     build_virtual_ns,
     build_virtual_obj,
     cleanup_trace,
@@ -91,6 +92,69 @@ async fn test_build_virtual_object_multiple_pod_specs(test_sim_root: SimulationR
             }
         })
     );
+}
+
+#[rstest(tokio::test)]
+async fn test_build_seed_obj_namespaced(test_sim_root: SimulationRoot, test_two_pods_obj: DynamicObject) {
+    let sobj = build_seed_obj(
+        TEST_SIM_NAME,
+        &test_sim_root,
+        TEST_VIRT_NS_PREFIX,
+        &test_two_pods_obj,
+        &kube::discovery::Scope::Namespaced,
+    );
+
+    // Namespace rewritten into the per-simulation virtual namespace
+    assert_eq!(sobj.metadata.namespace.unwrap(), format!("{TEST_VIRT_NS_PREFIX}-{TEST_NAMESPACE}"));
+    // Simulation root appended to ownerReferences
+    let owners = sobj.metadata.owner_references.as_ref().unwrap();
+    assert!(owners.iter().any(|o| o.kind == "SimulationRoot"));
+    // Status is preserved (will be reapplied via patch_status)
+    // (test_two_pods_obj has no status by default; just confirm it's not stripped)
+}
+
+#[rstest(tokio::test)]
+async fn test_build_seed_obj_cluster_scoped(test_sim_root: SimulationRoot) {
+    // Synthetic cluster-scoped object (no namespace) with a pre-existing ownerReference
+    // that must be preserved (load-bearing for controller adoption).
+    let mut node = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "v1".into(),
+            kind: "Node".into(),
+        }),
+        metadata: metav1::ObjectMeta {
+            name: Some("fake-node-1".into()),
+            owner_references: Some(vec![metav1::OwnerReference {
+                api_version: "karpenter.sh/v1".into(),
+                kind: "NodeClaim".into(),
+                name: "claim-xyz".into(),
+                uid: "stale-uid".into(),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        },
+        data: serde_json::json!({"spec": {"providerID": "kwok://fake-node-1"}}),
+    };
+    node.data["status"] = serde_json::json!({"capacity": {"cpu": "4"}});
+
+    let sobj = build_seed_obj(
+        TEST_SIM_NAME,
+        &test_sim_root,
+        TEST_VIRT_NS_PREFIX,
+        &node,
+        &kube::discovery::Scope::Cluster,
+    );
+
+    // Cluster-scoped objects keep no namespace
+    assert!(sobj.metadata.namespace.is_none());
+    // Existing ownerRef preserved (load-bearing for adoption), SimulationRoot appended
+    let owners = sobj.metadata.owner_references.as_ref().unwrap();
+    assert_eq!(owners.len(), 2);
+    assert!(owners.iter().any(|o| o.kind == "NodeClaim" && o.name == "claim-xyz"));
+    assert!(owners.iter().any(|o| o.kind == "SimulationRoot"));
+    // Status preserved through to patch_status pass
+    assert_eq!(sobj.data["status"]["capacity"]["cpu"], "4");
+    assert_eq!(sobj.data["spec"]["providerID"], "kwok://fake-node-1");
 }
 
 #[rstest(tokio::test)]

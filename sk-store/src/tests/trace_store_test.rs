@@ -118,6 +118,71 @@ async fn test_collect_events_owned_by_tracked_object(mut tracer: TraceStore, tes
 }
 
 #[rstest(tokio::test)]
+async fn test_export_seed_keeps_owned_objects(mut tracer: TraceStore, test_deployment: DynamicObject) {
+    let rs_api_version = ApiResource::from_gvk(&*REPLICASET_GVK);
+    let mut replicaset = DynamicObject::new(TEST_REPLICASET, &rs_api_version)
+        .within(TEST_NAMESPACE)
+        .data(json!({"spec": {"replicas": 42}}));
+    replicaset.owner_references_mut().push(metav1::OwnerReference {
+        api_version: "apps/v1".into(),
+        kind: "Deployment".into(),
+        name: TEST_DEPLOYMENT.into(),
+        ..Default::default()
+    });
+
+    tracer.create_or_update_obj(&test_deployment, 4).unwrap();
+    tracer.create_or_update_obj(&replicaset, 5).unwrap();
+
+    let data = tracer.export_seed(&Default::default()).unwrap();
+    let trace = ExportedTrace::import(data, None).unwrap();
+
+    // Verbatim mode keeps both the Deployment and the ReplicaSet, unlike the dedup
+    // path (test_collect_events_owned_by_tracked_object) which filters owned children.
+    assert_is_empty!(&trace.events);
+    assert_len_eq_x!(&trace.initial_state, 2);
+    let names: Vec<_> = trace
+        .initial_state
+        .iter()
+        .map(|o| o.name_any())
+        .collect();
+    assert_bag_eq!(names, vec![TEST_DEPLOYMENT.to_string(), TEST_REPLICASET.to_string()]);
+}
+
+#[rstest(tokio::test)]
+async fn test_export_seed_respects_excluded_namespaces(mut tracer: TraceStore) {
+    let in_ns = test_deployment("keep");
+    let mut excluded = test_deployment("drop");
+    excluded.metadata.namespace = Some("kube-system".into());
+
+    tracer.create_or_update_obj(&in_ns, 1).unwrap();
+    tracer.create_or_update_obj(&excluded, 2).unwrap();
+
+    let filter = ExportFilters {
+        excluded_namespaces: vec!["kube-system".into()],
+        ..Default::default()
+    };
+    let data = tracer.export_seed(&filter).unwrap();
+    let trace = ExportedTrace::import(data, None).unwrap();
+
+    assert_len_eq_x!(&trace.initial_state, 1);
+    assert_eq!(trace.initial_state[0].name_any(), "keep");
+}
+
+#[rstest(tokio::test)]
+async fn test_export_seed_respects_deletes(mut tracer: TraceStore) {
+    let obj = test_deployment("ephemeral");
+    tracer.create_or_update_obj(&obj, 1).unwrap();
+    tracer.index.insert(DEPL_GVK.clone(), obj.namespaced_name(), TEST_DEPL_HASH);
+    tracer.delete_obj(&obj, 5).unwrap();
+
+    let data = tracer.export_seed(&Default::default()).unwrap();
+    let trace = ExportedTrace::import(data, None).unwrap();
+
+    // Object was created then deleted before snapshot; it should not appear in seed state.
+    assert_is_empty!(&trace.initial_state);
+}
+
+#[rstest(tokio::test)]
 async fn test_collect_events(mut tracer: TraceStore) {
     let mut all_events: Vec<_> = [("obj1", 0), ("obj2", 1), ("obj3", 5), ("obj4", 10), ("obj5", 15)]
         .iter()

@@ -1,9 +1,16 @@
 use std::collections::HashMap;
 
 use assertables::*;
-use sk_core::k8s::PodLifecycleData;
+use serde::Serialize;
+use sk_core::k8s::{
+    GVK,
+    PodLifecycleData,
+};
 
 use super::*;
+use crate::config::TracerConfig;
+use crate::index::TraceIndex;
+use crate::pod_owners_map::PodLifecyclesMap;
 
 #[fixture]
 fn trace() -> ExportedTrace {
@@ -45,4 +52,46 @@ fn test_trace_start_end_ts(mut trace: ExportedTrace) {
 
     assert_some_eq_x!(trace.start_ts(), 0);
     assert_some_eq_x!(trace.end_ts(), 1);
+}
+
+// Mirror of the v2 ExportedTrace shape (no initial_state field).  Used to
+// confirm that v2 trace bytes still decode against the v3 struct via
+// #[serde(default)].
+#[derive(Serialize)]
+struct ExportedTraceV2 {
+    version: u16,
+    config: TracerConfig,
+    events: Vec<TraceEvent>,
+    index: TraceIndex,
+    pod_lifecycles: HashMap<(GVK, String), PodLifecyclesMap>,
+}
+
+#[rstest]
+fn test_v2_trace_imports_with_empty_initial_state() {
+    let v2 = ExportedTraceV2 {
+        version: 2,
+        config: TracerConfig::default(),
+        events: vec![TraceEvent { ts: 100, ..Default::default() }],
+        index: TraceIndex::default(),
+        pod_lifecycles: HashMap::default(),
+    };
+    let bytes = rmp_serde::to_vec_named(&v2).unwrap();
+
+    let trace = ExportedTrace::import(bytes, None).unwrap();
+    assert_eq!(trace.version, 2);
+    assert!(trace.initial_state.is_empty());
+    assert_eq!(trace.events.len(), 1);
+}
+
+#[rstest]
+fn test_unsupported_old_trace_version_rejected() {
+    let v1 = ExportedTraceV2 {
+        version: 1,
+        config: TracerConfig::default(),
+        events: vec![],
+        index: TraceIndex::default(),
+        pod_lifecycles: HashMap::default(),
+    };
+    let bytes = rmp_serde::to_vec_named(&v1).unwrap();
+    assert!(ExportedTrace::import(bytes, None).is_err());
 }
