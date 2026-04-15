@@ -279,12 +279,18 @@ mod itest {
             then.json_body(status_ok());
         });
 
+        // The status patch body must include apiVersion and kind or the apiserver rejects it
+        // with BadRequest.  Assert both are present so the bug fixed in a previous commit cannot
+        // recur silently.
         let order_status = order.clone();
         let status_seen_clone = status_seen_at.clone();
         fake_apiserver.handle(move |when, then| {
-            when.method(PATCH).path(format!(
-                "/apis/apps/v1/namespaces/{TEST_VIRT_NS_PREFIX}-{TEST_NAMESPACE}/deployments/seeded/status"
-            ));
+            when.method(PATCH)
+                .path(format!(
+                    "/apis/apps/v1/namespaces/{TEST_VIRT_NS_PREFIX}-{TEST_NAMESPACE}/deployments/seeded/status"
+                ))
+                .body_includes("\"apiVersion\"")
+                .body_includes("\"kind\"");
             status_seen_clone.store(order_status.fetch_add(1, Ordering::SeqCst), Ordering::SeqCst);
             then.json_body(status_ok());
         });

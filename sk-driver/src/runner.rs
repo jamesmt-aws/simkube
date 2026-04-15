@@ -268,13 +268,17 @@ pub(crate) async fn apply_seed_state(
     // Second pass: status subresources.  Done after all specs are present so controllers do not
     // observe half-populated objects mid-seed (e.g. a NodeClaim reading as Ready before its
     // companion Node exists).
+    //
+    // We send the full object (which still has apiVersion and kind in TypeMeta) rather than an
+    // inline {"status": ...} literal, because server-side apply rejects bodies without those
+    // fields.  The apiserver's status subresource handler ignores non-status fields on a status
+    // apply, so sending the whole thing is semantically equivalent.
     for sobj in &to_patch_status {
         info!("seed-patching status for {} {}", dyn_obj_type_str(sobj), sobj.namespaced_name());
-        let status_patch = json!({"status": sobj.data["status"]});
         apiset
             .api_for_obj(sobj)
             .await?
-            .patch_status(&sobj.name_any(), &PatchParams::apply("simkube"), &Patch::Apply(&status_patch))
+            .patch_status(&sobj.name_any(), &PatchParams::apply("simkube"), &Patch::Apply(sobj))
             .await?;
     }
 
