@@ -239,7 +239,43 @@ pub(crate) async fn apply_seed_state(
     for obj in &ctx.trace.initial_state {
         let gvk = GVK::from_dynamic_obj(obj)?;
         let scope = apiset.scope_for(&gvk).await?;
+
+        // Foreign-object safety net: if a cluster-scoped seed object already exists in the
+        // target cluster with no ownerReferences, it is pre-existing infrastructure (e.g. the
+        // kubelet's Node registration), not something the simulation owns.  Attaching
+        // SimulationRoot would make the simulation the sole owner; cleanup's foreground GC
+        // would then cascade-delete the object and take the cluster with it.  Detect and
+        // leave SimulationRoot off in that case.
+        let attach_root = if matches!(scope, Scope::Cluster) {
+            let api = apiset.api_for_obj(obj).await?;
+            match api.get_opt(&obj.name_any()).await? {
+                Some(existing)
+                    if existing
+                        .metadata
+                        .owner_references
+                        .as_ref()
+                        .is_none_or(|r| r.is_empty()) =>
+                {
+                    warn!(
+                        "cluster-scoped seed object {} {} already exists in the target cluster with no ownerReferences; \
+                         skipping SimulationRoot attachment.  This object will not be cleaned up with the simulation.",
+                        dyn_obj_type_str(obj),
+                        obj.name_any(),
+                    );
+                    false
+                },
+                _ => true,
+            }
+        } else {
+            true
+        };
+
         let mut sobj = build_seed_obj(&ctx.name, root, &ctx.virtual_ns_prefix, obj, &scope);
+        if !attach_root {
+            if let Some(refs) = sobj.metadata.owner_references.as_mut() {
+                refs.retain(|o| !(o.kind == "SimulationRoot" && o.name == root.name_any()));
+            }
+        }
 
         if matches!(scope, Scope::Namespaced) {
             let virtual_ns = sobj.namespace().unwrap();

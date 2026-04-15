@@ -205,3 +205,30 @@ pub fn apps_v1_discovery() -> serde_json::Value {
         ],
     })
 }
+
+// Minimal core/v1 discovery payload with just Node declared as cluster-scoped.  Enough to
+// exercise cluster-scoped seed-object paths without dragging in the full core v1 surface.
+pub fn core_v1_nodes_discovery() -> serde_json::Value {
+    json!({
+        "kind": "APIResourceList",
+        "apiVersion": "v1",
+        "groupVersion": "v1",
+        "resources": [
+            {
+                "name": "nodes",
+                "singularName": "node",
+                "namespaced": false,
+                "kind": "Node",
+                "verbs": ["create","delete","deletecollection","get","list","patch","update","watch"],
+                "shortNames": ["no"],
+            },
+            {
+                "name": "nodes/status",
+                "singularName": "",
+                "namespaced": false,
+                "kind": "Node",
+                "verbs": ["get","patch","update"],
+            },
+        ],
+    })
+}

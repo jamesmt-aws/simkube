@@ -308,6 +308,65 @@ mod itest {
     }
 
     #[rstest(tokio::test)]
+    async fn test_apply_seed_state_skips_simroot_for_foreign_cluster_obj(test_sim_root: SimulationRoot) {
+        // A cluster-scoped seed object (Node) that already exists in the target cluster with
+        // no ownerReferences is foreign infrastructure (e.g. a control-plane Node).  The
+        // driver must not attach SimulationRoot as sole owner; cleanup would cascade-delete
+        // it otherwise.
+        let (mut fake_apiserver, client) = make_fake_apiserver();
+        let cache = OwnersCache::new(DynamicApiSet::new(client.clone()));
+
+        let foreign_node = DynamicObject {
+            types: Some(TypeMeta { api_version: "v1".into(), kind: "Node".into() }),
+            metadata: metav1::ObjectMeta {
+                name: Some("control-plane-1".into()),
+                ..Default::default()
+            },
+            data: json!({"spec": {"providerID": "local://control-plane-1"}}),
+        };
+
+        let mut trace = ExportedTrace::default();
+        trace.initial_state = vec![foreign_node.clone()];
+        let ctx = build_driver_context(cache, trace);
+
+        fake_apiserver.handle(|when, then| {
+            when.path("/api/v1");
+            then.json_body(core_v1_nodes_discovery());
+        });
+
+        // Target cluster already has this Node with zero ownerReferences (the kubelet/k3s
+        // registered it on its own).
+        let existing = DynamicObject {
+            types: Some(TypeMeta { api_version: "v1".into(), kind: "Node".into() }),
+            metadata: metav1::ObjectMeta {
+                name: Some("control-plane-1".into()),
+                uid: Some("preexisting-uid".into()),
+                owner_references: None,
+                ..Default::default()
+            },
+            data: json!({}),
+        };
+        fake_apiserver.handle(move |when, then| {
+            when.method(GET).path("/api/v1/nodes/control-plane-1");
+            then.json_body_obj(&existing);
+        });
+
+        // The PATCH body must NOT include "SimulationRoot" - if it does, cleanup will eat the
+        // control-plane Node.
+        fake_apiserver.handle(|when, then| {
+            when.method(PATCH)
+                .path("/api/v1/nodes/control-plane-1")
+                .body_excludes("SimulationRoot");
+            then.json_body(status_ok());
+        });
+
+        let mut apiset = DynamicApiSet::new(client.clone());
+        let ns_api: kube::Api<corev1::Namespace> = kube::Api::all(client.clone());
+        apply_seed_state(&ctx, &test_sim_root, &mut apiset, &ns_api).await.unwrap();
+        fake_apiserver.assert();
+    }
+
+    #[rstest(tokio::test)]
     #[case::has_start_marker(true)]
     #[case::no_start_marker(false)]
     async fn test_driver_run(test_sim: Simulation, #[case] has_start_marker: bool) {
