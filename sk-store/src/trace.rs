@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use clockabilly::prelude::*;
 use serde::{
     Deserialize,
     Serialize,
@@ -84,36 +83,18 @@ impl ExportedTrace {
             return Err(TraceError::VersionTooNew(exported_trace.version, CURRENT_TRACE_FORMAT_VERSION).into());
         }
 
-        let trace_start_ts = exported_trace
-            .events
-            .first()
-            .unwrap_or(&TraceEvent { ts: UtcClock.now_ts(), ..Default::default() })
-            .ts;
-        let mut trace_end_ts = exported_trace
-            .events
-            .last()
-            .unwrap_or(&TraceEvent { ts: UtcClock.now_ts(), ..Default::default() })
-            .ts;
+        // If the caller passes a duration, cap the event stream to events strictly before
+        // (first_event_ts + duration).  Anything beyond that point is dropped.  We do not
+        // synthesize start/end markers here; that is the driver's job in run_trace, which is the
+        // layer that knows about hold semantics for seed-only traces and the like.
         if let Some(trace_duration_str) = maybe_duration {
-            trace_end_ts = duration_to_ts_from(trace_start_ts, trace_duration_str)?;
-            exported_trace.events.retain(|evt| evt.ts < trace_end_ts);
-
-            // If the events list is empty (e.g. seed-only traces), add a starting marker so
-            // start_ts() returns trace_start_ts rather than trace_end_ts.  Without this the
-            // driver would compute a zero-length simulation duration.
-            if exported_trace.events.is_empty() {
-                exported_trace
-                    .events
-                    .push(TraceEvent { ts: trace_start_ts, ..Default::default() });
+            if let Some(first) = exported_trace.events.first() {
+                let cap_ts = duration_to_ts_from(first.ts, trace_duration_str)?;
+                exported_trace.events.retain(|evt| evt.ts < cap_ts);
             }
-
-            // Add an empty event to the very end to make sure the driver doesn't shut down early
-            exported_trace
-                .events
-                .push(TraceEvent { ts: trace_end_ts, ..Default::default() });
         }
 
-        info!("Imported {} events between {trace_start_ts} and {trace_end_ts}", exported_trace.events.len());
+        info!("Imported {} events", exported_trace.events.len());
         Ok(exported_trace)
     }
 

@@ -375,7 +375,8 @@ mod itest {
             });
         }
 
-        run_trace_internal(&ctx, client, 1.0, root, TRACE_START, clock.clone())
+        let sim_end_ts = ctx.trace.end_ts().unwrap();
+        run_trace_internal(&ctx, client, 1.0, root, TRACE_START, sim_end_ts, clock.clone())
             .await
             .unwrap();
         fake_apiserver.assert();
@@ -461,7 +462,8 @@ mod itest {
             });
         });
 
-        run_trace_internal(&ctx, client, 1.0, root, TRACE_START, clock.clone())
+        let sim_end_ts = ctx.trace.end_ts().unwrap();
+        run_trace_internal(&ctx, client, 1.0, root, TRACE_START, sim_end_ts, clock.clone())
             .await
             .unwrap();
         fake_apiserver.assert();

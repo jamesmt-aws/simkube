@@ -28,6 +28,7 @@ use sk_core::k8s::{
 };
 use sk_core::macros::*;
 use sk_core::prelude::*;
+use sk_core::time::duration_to_ts_from;
 use tokio::time::sleep;
 use tracing::*;
 
@@ -156,13 +157,7 @@ pub async fn run_trace(ctx: DriverContext, client: kube::Client, sim: Simulation
     };
 
     let clock = UtcClock::boxed();
-    let now_ts = clock.now_ts();
-    let sim_ts = match ctx.trace.start_ts() {
-        Some(ts) => ts,
-        None if !ctx.trace.initial_state.is_empty() => now_ts,
-        None => bail!("no trace data"),
-    };
-    let sim_end_ts = ctx.trace.end_ts().unwrap_or(sim_ts);
+    let (sim_ts, sim_end_ts) = compute_sim_window(&ctx, &sim, clock.now_ts())?;
     let sim_duration = compute_step_size(sim.speed(), sim_ts, sim_end_ts);
     info!(
         "trace start time: {sim_ts}; trace end time: {sim_end_ts}; simulation speed: {}; computed simulation duration: {sim_duration}",
@@ -170,10 +165,35 @@ pub async fn run_trace(ctx: DriverContext, client: kube::Client, sim: Simulation
     );
 
     try_update_lease(client.clone(), &sim, &ctx.ctrl_ns, sim_duration as u64).await?;
-    run_trace_internal(&ctx, client, sim.speed(), root, sim_ts, clock.clone()).await?;
+    run_trace_internal(&ctx, client, sim.speed(), root, sim_ts, sim_end_ts, clock.clone()).await?;
 
     let timeout = clock.now_ts() + DRIVER_CLEANUP_TIMEOUT_SECONDS;
     cleanup_trace(&ctx, roots_api, clock, timeout).await
+}
+
+// Compute the (start, end) timestamps for this simulation run.  Three cases:
+//
+// - Trace has events: use the first/last event timestamps.  sim.spec.duration is honored at
+//   import time by capping the event stream; we do not re-pad here.
+// - Trace has no events but does carry initial_state (seed-only): require sim.spec.duration so
+//   the driver knows how long to hold the seeded cluster open.  Window is (now, now + duration).
+// - Trace has no events and no initial_state: nothing to simulate.
+fn compute_sim_window(ctx: &DriverContext, sim: &Simulation, now_ts: i64) -> anyhow::Result<(i64, i64)> {
+    if let Some(start) = ctx.trace.start_ts() {
+        let end = ctx.trace.end_ts().expect("end_ts is Some whenever start_ts is Some");
+        return Ok((start, end));
+    }
+    if ctx.trace.initial_state.is_empty() {
+        bail!("trace contains no events and no seed state; nothing to do");
+    }
+    let duration = sim.spec.duration.as_ref().ok_or_else(|| {
+        anyhow!(
+            "seed-only traces (initial_state populated, events empty) require sim.spec.duration \
+             to control how long the driver holds the simulated cluster open after the seed is applied"
+        )
+    })?;
+    let end = duration_to_ts_from(now_ts, duration)?;
+    Ok((now_ts, end))
 }
 
 // Transform a captured seed object for application into the simulated cluster.  Cluster-scoped
@@ -267,6 +287,7 @@ pub(crate) async fn run_trace_internal(
     sim_speed: f64,
     root: SimulationRoot,
     mut current_ts: i64,
+    sim_end_ts: i64,
     clock: Box<dyn Clockable + Send>,
 ) -> EmptyResult {
     let ns_api: kube::Api<corev1::Namespace> = kube::Api::all(client.clone());
@@ -321,6 +342,16 @@ pub(crate) async fn run_trace_internal(
             current_ts = next_ts;
             clock.sleep(sleep_duration).await;
         }
+    }
+
+    // Hold the cluster open until the configured simulation end if we have not reached it.
+    // For event-only traces this is usually a no-op (last event ts == sim_end_ts); for
+    // seed-only traces with a duration set this is what makes the driver wait long enough
+    // for controllers to react before cleanup runs.
+    let remaining = compute_step_size(sim_speed, current_ts, sim_end_ts);
+    if remaining > 0 {
+        info!("holding simulated cluster open for {remaining} seconds");
+        clock.sleep(remaining).await;
     }
     Ok(())
 }
