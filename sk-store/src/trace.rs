@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use anyhow::bail;
 use clockabilly::prelude::*;
 use serde::{
     Deserialize,
@@ -10,15 +9,19 @@ use sk_core::k8s::{
     GVK,
     PodLifecycleData,
 };
+use sk_core::prelude::*;
 use sk_core::time::duration_to_ts_from;
 use thiserror::Error;
 use tracing::*;
 
-use crate::CURRENT_TRACE_FORMAT_VERSION;
 use crate::config::TracerConfig;
 use crate::event::TraceEvent;
 use crate::index::TraceIndex;
 use crate::pod_owners_map::PodLifecyclesMap;
+use crate::{
+    CURRENT_TRACE_FORMAT_VERSION,
+    MIN_SUPPORTED_TRACE_FORMAT_VERSION,
+};
 
 #[derive(Debug, Error)]
 pub enum TraceError {
@@ -27,6 +30,18 @@ pub enum TraceError {
         it is only parseable by SimKube <= 1.1.1.  Please see the release notes for details."
     )]
     ParseFailed(#[from] rmp_serde::decode::Error),
+
+    #[error(
+        "trace file version {0} is older than the minimum supported version {1}; \
+        please re-record with a newer SimKube release"
+    )]
+    VersionTooOld(u16, u16),
+
+    #[error(
+        "trace file version {0} is newer than this binary supports (max {1}); \
+        please upgrade SimKube"
+    )]
+    VersionTooNew(u16, u16),
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -36,6 +51,13 @@ pub struct ExportedTrace {
     pub events: Vec<TraceEvent>,
     pub index: TraceIndex,
     pub pod_lifecycles: HashMap<(GVK, String), PodLifecyclesMap>,
+
+    // Cluster state to materialize before the event loop runs.  Populated by
+    // verbatim-mode export (skctl snapshot --seed); empty for traces produced
+    // by the standard recording path.  Optional on decode so v2 traces still
+    // load.
+    #[serde(default)]
+    pub initial_state: Vec<DynamicObject>,
 }
 
 impl Default for ExportedTrace {
@@ -46,6 +68,7 @@ impl Default for ExportedTrace {
             events: vec![],
             index: TraceIndex::default(),
             pod_lifecycles: HashMap::default(),
+            initial_state: vec![],
         }
     }
 }
@@ -54,8 +77,11 @@ impl ExportedTrace {
     pub fn import(data: Vec<u8>, maybe_duration: Option<&String>) -> anyhow::Result<ExportedTrace> {
         let mut exported_trace = rmp_serde::from_slice::<ExportedTrace>(&data).map_err(TraceError::ParseFailed)?;
 
-        if exported_trace.version != CURRENT_TRACE_FORMAT_VERSION {
-            bail!("unsupported trace version: {}", exported_trace.version);
+        if exported_trace.version < MIN_SUPPORTED_TRACE_FORMAT_VERSION {
+            return Err(TraceError::VersionTooOld(exported_trace.version, MIN_SUPPORTED_TRACE_FORMAT_VERSION).into());
+        }
+        if exported_trace.version > CURRENT_TRACE_FORMAT_VERSION {
+            return Err(TraceError::VersionTooNew(exported_trace.version, CURRENT_TRACE_FORMAT_VERSION).into());
         }
 
         let trace_start_ts = exported_trace

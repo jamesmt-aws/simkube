@@ -55,6 +55,7 @@ pub async fn apply_skel_file(
         events: new_events,
         index: trace.index.clone(),
         pod_lifecycles: trace.pod_lifecycles.clone(),
+        initial_state: trace.initial_state.clone(),
     };
 
     Ok(new_trace)

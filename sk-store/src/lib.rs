@@ -25,7 +25,8 @@ pub use crate::trace::{
     TraceIterator,
 };
 
-const CURRENT_TRACE_FORMAT_VERSION: u16 = 2;
+const CURRENT_TRACE_FORMAT_VERSION: u16 = 3;
+const MIN_SUPPORTED_TRACE_FORMAT_VERSION: u16 = 2;
 
 #[cfg(test)]
 mod tests;
