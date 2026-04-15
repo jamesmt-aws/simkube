@@ -14,6 +14,7 @@ use kube::api::{
     PatchParams,
     PropagationPolicy,
 };
+use kube::discovery::Scope;
 use serde_json::json;
 use sk_core::errors::*;
 use sk_core::k8s::{
@@ -155,8 +156,13 @@ pub async fn run_trace(ctx: DriverContext, client: kube::Client, sim: Simulation
     };
 
     let clock = UtcClock::boxed();
-    let sim_ts = ctx.trace.start_ts().ok_or(anyhow!("no trace data"))?;
-    let sim_end_ts = ctx.trace.end_ts().ok_or(anyhow!("no trace data"))?;
+    let now_ts = clock.now_ts();
+    let sim_ts = match ctx.trace.start_ts() {
+        Some(ts) => ts,
+        None if !ctx.trace.initial_state.is_empty() => now_ts,
+        None => bail!("no trace data"),
+    };
+    let sim_end_ts = ctx.trace.end_ts().unwrap_or(sim_ts);
     let sim_duration = compute_step_size(sim.speed(), sim_ts, sim_end_ts);
     info!(
         "trace start time: {sim_ts}; trace end time: {sim_end_ts}; simulation speed: {}; computed simulation duration: {sim_duration}",
@@ -170,6 +176,91 @@ pub async fn run_trace(ctx: DriverContext, client: kube::Client, sim: Simulation
     cleanup_trace(&ctx, roots_api, clock, timeout).await
 }
 
+// Transform a captured seed object for application into the simulated cluster.  Cluster-scoped
+// objects (Node, NodeClaim, NodePool, ...) keep their original name and identity; namespace-scoped
+// objects get rewritten into the per-simulation virtual namespace.  Both retain their original
+// ownerReferences (load-bearing for controller adoption) and have the SimulationRoot ref appended
+// for cleanup.  Status is intentionally left in place here; the driver applies it via patch_status
+// in a follow-up pass.
+pub fn build_seed_obj(
+    sim_name: &str,
+    root: &SimulationRoot,
+    virtual_ns_prefix: &str,
+    obj: &DynamicObject,
+    scope: &Scope,
+) -> DynamicObject {
+    let mut sobj = obj.clone();
+    add_common_metadata(sim_name, root, &mut sobj.metadata);
+    klabel_insert!(sobj, VIRTUAL_LABEL_KEY => "true");
+
+    if matches!(scope, Scope::Namespaced) {
+        let original_ns = sobj.namespace().unwrap_or_default();
+        sobj.metadata.namespace = Some(format!("{virtual_ns_prefix}-{original_ns}"));
+    }
+
+    sobj
+}
+
+async fn apply_seed_state(
+    ctx: &DriverContext,
+    root: &SimulationRoot,
+    apiset: &mut DynamicApiSet,
+    ns_api: &kube::Api<corev1::Namespace>,
+) -> EmptyResult {
+    if ctx.trace.initial_state.is_empty() {
+        return Ok(());
+    }
+    info!("Applying {} seed objects", ctx.trace.initial_state.len());
+
+    let mut to_patch_status: Vec<DynamicObject> = vec![];
+
+    // First pass: apply specs.  Server-side apply does not write subresources, so any captured
+    // .status field is stashed for the second pass.
+    for obj in &ctx.trace.initial_state {
+        let gvk = GVK::from_dynamic_obj(obj)?;
+        let scope = apiset.scope_for(&gvk).await?;
+        let mut sobj = build_seed_obj(&ctx.name, root, &ctx.virtual_ns_prefix, obj, &scope);
+
+        if matches!(scope, Scope::Namespaced) {
+            let virtual_ns = sobj.namespace().unwrap();
+            if ns_api.get_opt(&virtual_ns).await?.is_none() {
+                info!("creating virtual namespace: {virtual_ns}");
+                let vns = build_virtual_ns(ctx, root, &virtual_ns);
+                ns_api.create(&Default::default(), &vns).await?;
+            }
+        }
+
+        let stashed_status = sobj.data.as_object_mut().and_then(|m| m.remove("status"));
+
+        info!("seed-applying {} {}", dyn_obj_type_str(&sobj), sobj.namespaced_name());
+        apiset
+            .api_for_obj(&sobj)
+            .await?
+            .patch(&sobj.name_any(), &PatchParams::apply("simkube"), &Patch::Apply(&sobj))
+            .await?;
+
+        if let Some(status) = stashed_status {
+            sobj.data["status"] = status;
+            to_patch_status.push(sobj);
+        }
+    }
+
+    // Second pass: status subresources.  Done after all specs are present so controllers do not
+    // observe half-populated objects mid-seed (e.g. a NodeClaim reading as Ready before its
+    // companion Node exists).
+    for sobj in &to_patch_status {
+        info!("seed-patching status for {} {}", dyn_obj_type_str(sobj), sobj.namespaced_name());
+        let status_patch = json!({"status": sobj.data["status"]});
+        apiset
+            .api_for_obj(sobj)
+            .await?
+            .patch_status(&sobj.name_any(), &PatchParams::apply("simkube"), &Patch::Apply(&status_patch))
+            .await?;
+    }
+
+    Ok(())
+}
+
 pub(crate) async fn run_trace_internal(
     ctx: &DriverContext,
     client: kube::Client,
@@ -180,6 +271,8 @@ pub(crate) async fn run_trace_internal(
 ) -> EmptyResult {
     let ns_api: kube::Api<corev1::Namespace> = kube::Api::all(client.clone());
     let mut apiset = DynamicApiSet::new(client.clone());
+
+    apply_seed_state(ctx, &root, &mut apiset, &ns_api).await?;
 
     for (evt, maybe_next_ts) in ctx.trace.iter() {
         current_ts += wait_if_paused(client.clone(), &ctx.sim_name, clock.clone()).await?;

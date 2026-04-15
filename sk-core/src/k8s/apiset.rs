@@ -5,7 +5,10 @@ use kube::api::{
     ApiResource,
     DynamicObject,
 };
-use kube::discovery::ApiCapabilities;
+use kube::discovery::{
+    ApiCapabilities,
+    Scope,
+};
 
 use crate::k8s::GVK;
 
@@ -55,6 +58,10 @@ impl DynamicApiSet {
             },
             None => Ok(self.unnamespaced_api_by_gvk(&gvk).await?.0),
         }
+    }
+
+    pub async fn scope_for(&mut self, gvk: &GVK) -> anyhow::Result<Scope> {
+        Ok(self.api_meta_for(gvk).await?.1.scope.clone())
     }
 
     async fn api_meta_for(&mut self, gvk: &GVK) -> anyhow::Result<&(ApiResource, ApiCapabilities)> {

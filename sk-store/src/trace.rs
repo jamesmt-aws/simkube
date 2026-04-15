@@ -98,6 +98,15 @@ impl ExportedTrace {
             trace_end_ts = duration_to_ts_from(trace_start_ts, trace_duration_str)?;
             exported_trace.events.retain(|evt| evt.ts < trace_end_ts);
 
+            // If the events list is empty (e.g. seed-only traces), add a starting marker so
+            // start_ts() returns trace_start_ts rather than trace_end_ts.  Without this the
+            // driver would compute a zero-length simulation duration.
+            if exported_trace.events.is_empty() {
+                exported_trace
+                    .events
+                    .push(TraceEvent { ts: trace_start_ts, ..Default::default() });
+            }
+
             // Add an empty event to the very end to make sure the driver doesn't shut down early
             exported_trace
                 .events
